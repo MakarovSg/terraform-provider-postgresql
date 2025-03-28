@@ -299,8 +299,14 @@ func grantRoleDefaultPrivileges(txn *sql.Tx, d *schema.ResourceData) error {
 		inSchema = fmt.Sprintf("IN SCHEMA %s", pq.QuoteIdentifier(pgSchema))
 	}
 
-	query := fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %s %s GRANT %s ON %sS TO %s",
-		pq.QuoteIdentifier(d.Get("owner").(string)),
+	// If an owner is specified, build the query string to include it
+	var forOwner string
+	if d.Get("owner").(string) != "" {
+		forOwner = fmt.Sprintf("FOR ROLE %s", pq.QuoteIdentifier(d.Get("owner").(string)))
+	}
+
+	query := fmt.Sprintf("ALTER DEFAULT PRIVILEGES %s %s GRANT %s ON %sS TO %s",
+		forOwner,
 		inSchema,
 		strings.Join(privileges, ","),
 		strings.ToUpper(d.Get("object_type").(string)),
