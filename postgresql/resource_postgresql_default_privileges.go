@@ -35,7 +35,7 @@ func resourcePostgreSQLDefaultPrivileges() *schema.Resource {
 			},
 			"owner": {
 				Type:        schema.TypeString,
-				Required:    true,
+				Optional:    true,
 				ForceNew:    true,
 				Description: "Target role for which to alter default privileges.",
 			},
@@ -141,21 +141,23 @@ func resourcePostgreSQLDefaultPrivilegesCreate(db *DBConnection, d *schema.Resou
 	}
 
 	// Needed in order to set the owner of the db if the connection user is not a superuser
-	if err := withRolesGranted(txn, []string{owner}, func() error {
+	if owner != "" {
+		if err := withRolesGranted(txn, []string{owner}, func() error {
 
-		// Revoke all privileges before granting otherwise reducing privileges will not work.
-		// We just have to revoke them in the same transaction so role will not lose its privileges
-		// between revoke and grant.
-		if err = revokeRoleDefaultPrivileges(txn, d); err != nil {
+			// Revoke all privileges before granting otherwise reducing privileges will not work.
+			// We just have to revoke them in the same transaction so role will not lose its privileges
+			// between revoke and grant.
+			if err = revokeRoleDefaultPrivileges(txn, d); err != nil {
+				return err
+			}
+
+			if err = grantRoleDefaultPrivileges(txn, d); err != nil {
+				return err
+			}
+			return nil
+		}); err != nil {
 			return err
 		}
-
-		if err = grantRoleDefaultPrivileges(txn, d); err != nil {
-			return err
-		}
-		return nil
-	}); err != nil {
-		return err
 	}
 
 	if err := txn.Commit(); err != nil {
@@ -196,10 +198,12 @@ func resourcePostgreSQLDefaultPrivilegesDelete(db *DBConnection, d *schema.Resou
 	}
 
 	// Needed in order to set the owner of the db if the connection user is not a superuser
-	if err := withRolesGranted(txn, []string{owner}, func() error {
-		return revokeRoleDefaultPrivileges(txn, d)
-	}); err != nil {
-		return err
+	if owner != "" {
+		if err := withRolesGranted(txn, []string{owner}, func() error {
+			return revokeRoleDefaultPrivileges(txn, d)
+		}); err != nil {
+			return err
+		}
 	}
 
 	if err := txn.Commit(); err != nil {
