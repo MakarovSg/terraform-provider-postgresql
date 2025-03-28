@@ -35,7 +35,7 @@ func resourcePostgreSQLDefaultPrivileges() *schema.Resource {
 			},
 			"owner": {
 				Type:        schema.TypeString,
-				Required:    true,
+				Optional:    true,
 				ForceNew:    true,
 				Description: "Target role for which to alter default privileges.",
 			},
@@ -136,26 +136,27 @@ func resourcePostgreSQLDefaultPrivilegesCreate(db *DBConnection, d *schema.Resou
 	}
 	defer deferredRollback(txn)
 
-	if err := pgLockRole(txn, owner); err != nil {
-		return err
-	}
-
 	// Needed in order to set the owner of the db if the connection user is not a superuser
-	if err := withRolesGranted(txn, []string{owner}, func() error {
-
-		// Revoke all privileges before granting otherwise reducing privileges will not work.
-		// We just have to revoke them in the same transaction so role will not lose its privileges
-		// between revoke and grant.
-		if err = revokeRoleDefaultPrivileges(txn, d); err != nil {
+	if owner != "" {
+		if err := pgLockRole(txn, owner); err != nil {
 			return err
 		}
+		if err := withRolesGranted(txn, []string{owner}, func() error {
 
-		if err = grantRoleDefaultPrivileges(txn, d); err != nil {
+			// Revoke all privileges before granting otherwise reducing privileges will not work.
+			// We just have to revoke them in the same transaction so role will not lose its privileges
+			// between revoke and grant.
+			if err = revokeRoleDefaultPrivileges(txn, d); err != nil {
+				return err
+			}
+
+			if err = grantRoleDefaultPrivileges(txn, d); err != nil {
+				return err
+			}
+			return nil
+		}); err != nil {
 			return err
 		}
-		return nil
-	}); err != nil {
-		return err
 	}
 
 	if err := txn.Commit(); err != nil {
@@ -191,15 +192,16 @@ func resourcePostgreSQLDefaultPrivilegesDelete(db *DBConnection, d *schema.Resou
 	}
 	defer deferredRollback(txn)
 
-	if err := pgLockRole(txn, owner); err != nil {
-		return err
-	}
-
 	// Needed in order to set the owner of the db if the connection user is not a superuser
-	if err := withRolesGranted(txn, []string{owner}, func() error {
-		return revokeRoleDefaultPrivileges(txn, d)
-	}); err != nil {
-		return err
+	if owner != "" {
+		if err := pgLockRole(txn, owner); err != nil {
+			return err
+		}
+		if err := withRolesGranted(txn, []string{owner}, func() error {
+			return revokeRoleDefaultPrivileges(txn, d)
+		}); err != nil {
+			return err
+		}
 	}
 
 	if err := txn.Commit(); err != nil {
@@ -228,7 +230,7 @@ func readRoleDefaultPrivileges(txn *sql.Tx, d *schema.ResourceData) error {
 	var query string
 	var queryArgs []interface{}
 
-	if pgSchema != "" {
+	if pgSchema != "" && owner != "" {
 		query = `SELECT array_agg(prtype) FROM (
 		SELECT defaclnamespace, (aclexplode(defaclacl)).* FROM pg_default_acl
 		WHERE defaclobjtype = $3
@@ -237,7 +239,7 @@ func readRoleDefaultPrivileges(txn *sql.Tx, d *schema.ResourceData) error {
 	WHERE grantee_oid = $1 AND nspname = $2 AND pg_get_userbyid(grantor_oid) = $4;
 `
 		queryArgs = []interface{}{roleOID, pgSchema, objectTypes[objectType], owner}
-	} else {
+	} else if owner != "" {
 		query = `SELECT array_agg(prtype) FROM (
 		SELECT defaclnamespace, (aclexplode(defaclacl)).* FROM pg_default_acl
 		WHERE defaclobjtype = $2
@@ -245,6 +247,14 @@ func readRoleDefaultPrivileges(txn *sql.Tx, d *schema.ResourceData) error {
 	WHERE grantee_oid = $1 AND namespace = 0 AND pg_get_userbyid(grantor_oid) = $3;
 `
 		queryArgs = []interface{}{roleOID, objectTypes[objectType], owner}
+	} else {
+		query = `SELECT array_agg(prtype) FROM (
+		SELECT defaclnamespace, (aclexplode(defaclacl)).* FROM pg_default_acl
+		WHERE defaclobjtype = $2
+	) AS t (namespace, grantor_oid, grantee_oid, prtype, grantable)
+	WHERE grantee_oid = $1 AND namespace = 0;
+`
+		queryArgs = []interface{}{roleOID, objectTypes[objectType]}
 	}
 
 	// This query aggregates the list of default privileges type (prtype)
@@ -336,9 +346,16 @@ func revokeRoleDefaultPrivileges(txn *sql.Tx, d *schema.ResourceData) error {
 	if pgSchema != "" {
 		inSchema = fmt.Sprintf("IN SCHEMA %s", pq.QuoteIdentifier(pgSchema))
 	}
+
+	// If an owner is specified, build the query string to include it
+	var forOwner string
+	if d.Get("owner").(string) != "" {
+		forOwner = fmt.Sprintf("FOR ROLE %s", pq.QuoteIdentifier(d.Get("owner").(string)))
+	}
+
 	query := fmt.Sprintf(
-		"ALTER DEFAULT PRIVILEGES FOR ROLE %s %s REVOKE ALL ON %sS FROM %s",
-		pq.QuoteIdentifier(d.Get("owner").(string)),
+		"ALTER DEFAULT PRIVILEGES %s %s REVOKE ALL ON %sS FROM %s",
+		forOwner,
 		inSchema,
 		strings.ToUpper(d.Get("object_type").(string)),
 		pq.QuoteIdentifier(d.Get("role").(string)),
@@ -356,9 +373,15 @@ func generateDefaultPrivilegesID(d *schema.ResourceData) string {
 		pgSchema = "noschema"
 	}
 
+	// If an owner is specified, include it in the ID
+	var owner string
+	if d.Get("owner").(string) != "" {
+		owner = d.Get("owner").(string)
+	}
+
 	return strings.Join([]string{
 		d.Get("role").(string), d.Get("database").(string), pgSchema,
-		d.Get("owner").(string), d.Get("object_type").(string),
+		owner, d.Get("object_type").(string),
 	}, "_")
 
 }
